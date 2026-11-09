@@ -42,6 +42,9 @@ uploads/
 *.db
 !prisma/migrations/**/*.sql
 
+# ---------- Database backups (npm run db:backup) ----------
+backups/
+
 # ---------- Logs ----------
 logs/
 *.log

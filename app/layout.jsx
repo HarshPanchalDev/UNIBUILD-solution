@@ -25,7 +25,14 @@ export const viewport = {
 export default function RootLayout({ children }) {
   return (
     <html lang="hi" className={`${inter.variable} ${devanagari.variable} ${poppins.variable} ${script.variable}`}>
-      <body className="font-sans antialiased">{children}</body>
+      <body className="font-sans antialiased">
+        {process.env.STAGING_MODE === "true" && (
+          <div role="status" className="relative z-[100] bg-amber-400 px-3 py-1 text-center text-xs font-semibold text-navy-900">
+            DEMO / TEST SERVER — sample data only, sign-in codes shown on screen. Not the live UNIBUILD app.
+          </div>
+        )}
+        {children}
+      </body>
     </html>
   );
 }

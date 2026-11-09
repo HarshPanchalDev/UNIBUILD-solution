@@ -18,7 +18,10 @@
     "db:studio": "prisma studio",
     "cron:daily": "node scripts/run-daily-jobs.js",
     "postinstall": "prisma generate",
-    "test:smoke": "node scripts/smoke.js"
+    "test:smoke": "node scripts/smoke.js",
+    "db:backup": "node scripts/backup-db.js",
+    "db:restore": "node scripts/restore-db.js",
+    "start:staging": "prisma migrate deploy && node prisma/seed.js && node prisma/seed-demo.js && next start"
   },
   "dependencies": {
     "@prisma/client": "^6.16.0",

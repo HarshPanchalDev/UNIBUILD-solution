@@ -12,8 +12,8 @@ import { createLink } from "../lib/loyalty/links.js";
 import { approvePartner } from "../lib/loyalty/partners.js";
 import { getActiveSettings } from "../lib/loyalty/settingsService.js";
 
-if (process.env.NODE_ENV === "production") {
-  console.error("seed-demo is for development only.");
+if (process.env.NODE_ENV === "production" && process.env.STAGING_MODE !== "true") {
+  console.error("seed-demo is for development only (or a STAGING_MODE demo server).");
   process.exit(1);
 }
 

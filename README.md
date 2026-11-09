@@ -114,8 +114,16 @@ npx pm2 start "npm start" --name unibuild    # or a systemd service
 
 nginx: proxy `https://your-domain` → `http://127.0.0.1:3000`, set `client_max_body_size 12m;` for uploads, and pass `X-Forwarded-For` / `X-Forwarded-Host`.
 
-Backups (spec NFR): daily `mysqldump` + copy of `STORAGE_DIR`, keep 30 days, and test a restore before launch, e.g.
-`0 2 * * * mysqldump unibuild | gzip > /backups/unibuild-$(date +\%F).sql.gz && find /backups -mtime +30 -delete`
+### Backups (spec NFR)
+
+```bash
+npm run db:backup                 # → backups/unibuild-YYYY-MM-DD_HHMM.sql.gz, keeps the newest 30 (BACKUP_KEEP)
+npm run db:restore -- backups/unibuild-2026-11-09_0200.sql.gz --yes   # REPLACES the current data
+```
+
+- Schedule daily: Linux `0 2 * * * cd /var/www/unibuild && npm run db:backup >> logs/backup.log 2>&1`; Windows: Task Scheduler → "npm run db:backup", start in the project folder.
+- On Windows, if `mysqldump`/`mysql` are not found, set `MYSQLDUMP_PATH` / `MYSQL_PATH` in `.env` (see `.env.example`).
+- Also copy the `STORAGE_DIR` folder (photos, reward images, BUSY files) and keep backups **off the server** too (e.g. a cloud drive). Test a restore before launch.
 
 ## 6. Environment variables
 
