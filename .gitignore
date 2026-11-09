@@ -1,0 +1,73 @@
+# ---------- Dependencies ----------
+node_modules/
+.pnp
+.pnp.js
+.yarn/
+
+# ---------- Next.js build output ----------
+.next/
+out/
+build/
+dist/
+next-env.d.ts
+*.tsbuildinfo
+
+# ---------- Secrets / environment ----------
+# Real env files contain DB passwords, session secrets, SMS keys — never commit.
+.env
+.env.*
+!.env.example
+
+# Keys and certificates
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa*
+secrets/
+credentials*.json
+service-account*.json
+
+# ---------- Uploaded files / local storage ----------
+# BUSY uploads, generated reports, partner documents (STORAGE_DIR)
+storage/
+uploads/
+
+# ---------- Databases / dumps ----------
+*.sql
+*.sql.gz
+*.dump
+*.sqlite
+*.db
+!prisma/migrations/**/*.sql
+
+# ---------- Logs ----------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Testing / coverage ----------
+coverage/
+.nyc_output/
+
+# ---------- Deployment ----------
+.vercel
+.netlify
+
+# ---------- OS / editor ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*~
+
+# ---------- Claude Code local settings ----------
+.claude/settings.local.json

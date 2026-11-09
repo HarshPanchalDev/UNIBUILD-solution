@@ -1,0 +1,682 @@
+// UNIBUILD Partner App — database schema (MySQL 8)
+// Rules that the schema enforces:
+//  - Partner codes, site codes, invoice and credit-note numbers are unique and never reused.
+//  - At most one active link per (site, trade): SiteLink.activeSlot is unique and NULL once the link ends.
+//  - Ledger entries are append-only (no delete paths in the app). Corrections are new entries.
+//  - Money is Decimal, points are Int. Never Float.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Users & auth ─────────────────────────────
+
+enum Role {
+  PARTNER
+  STORE_MANAGER
+  OWNER
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  role         Role
+  name         String    @db.VarChar(120)
+  mobile       String?   @unique @db.VarChar(15)
+  email        String?   @unique @db.VarChar(160)
+  passwordHash String?   @db.VarChar(255)
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  partner       Partner?
+  sessions      Session[]
+  notifications Notification[]
+  auditLogs     AuditLog[]
+
+  @@index([role])
+}
+
+model Session {
+  id         Int      @id @default(autoincrement())
+  tokenHash  String   @unique @db.Char(64)
+  userId     Int
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  ip         String?  @db.VarChar(64)
+  userAgent  String?  @db.VarChar(255)
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+enum OtpPurpose {
+  PARTNER_LOGIN
+  PARTNER_REGISTER
+  STAFF_LOGIN
+}
+
+model OtpRequest {
+  id         Int        @id @default(autoincrement())
+  mobile     String     @db.VarChar(15)
+  purpose    OtpPurpose
+  codeHash   String     @db.Char(64)
+  attempts   Int        @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  ip         String?    @db.VarChar(64)
+  createdAt  DateTime   @default(now())
+
+  @@index([mobile, purpose, createdAt])
+}
+
+model RateLimit {
+  key     String   @id @db.VarChar(191)
+  count   Int
+  resetAt DateTime
+}
+
+// Sequences for codes that must never be reused (UBP-CO, UBP-PL, R-, area prefixes…)
+model CodeSequence {
+  key  String @id @db.VarChar(40)
+  next Int    @default(1)
+}
+
+// ───────────────────────────── Partners ─────────────────────────────
+
+enum Trade {
+  CONTRACTOR
+  PLUMBER
+  ELECTRICIAN
+  PAINTER
+}
+
+enum PartnerStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum Tier {
+  SAATHI
+  SILVER
+  GOLD
+}
+
+model Partner {
+  id               Int           @id @default(autoincrement())
+  userId           Int           @unique
+  user             User          @relation(fields: [userId], references: [id])
+  code             String?       @unique @db.VarChar(20)
+  trade            Trade
+  areaServed       String        @db.VarChar(160)
+  photoKey         String?       @db.VarChar(255)
+  status           PartnerStatus @default(PENDING)
+  tier             Tier          @default(SAATHI)
+  // Points still owed after a return that the balance could not cover (CARRY_FORWARD policy).
+  pendingDeduction Int           @default(0)
+  termsAcceptedAt  DateTime
+  whatsappOptIn    Boolean       @default(false)
+  statusReason     String?       @db.VarChar(500)
+  approvedAt       DateTime?
+  approvedById     Int?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  links           SiteLink[]
+  lots            PointLot[]
+  ledger          LedgerEntry[]
+  redemptions     Redemption[]
+  linkRequests    SiteLinkRequest[]
+  tierHistory     TierHistory[]
+  shortfalls      ReversalShortfall[]
+  submittedSites  Site[]            @relation("SubmittedBy")
+
+  @@index([status])
+  @@index([trade])
+}
+
+model TierHistory {
+  id            Int      @id @default(autoincrement())
+  partnerId     Int
+  partner       Partner  @relation(fields: [partnerId], references: [id])
+  fromTier      Tier
+  toTier        Tier
+  quarter       String?  @db.VarChar(10) // e.g. 2027-Q1
+  purchaseValue Decimal? @db.Decimal(16, 2)
+  reason        String?  @db.VarChar(500)
+  createdById   Int?
+  createdAt     DateTime @default(now())
+
+  @@index([partnerId])
+}
+
+// ───────────────────────────── Sites ─────────────────────────────
+
+enum SiteStatus {
+  ACTIVE
+  COMPLETED
+  MERGED
+}
+
+enum SiteSource {
+  COUNTER
+  FIELD_SURVEY
+  PARTNER_REQUEST
+  ADMIN
+  UPLOAD
+}
+
+model Site {
+  id                Int        @id @default(autoincrement())
+  code              String     @unique @db.VarChar(20)
+  // Optional label shown to partners (e.g. "Patel Building"). Partners never see the owner's name or phone.
+  displayName       String?    @db.VarChar(120)
+  ownerName         String     @db.VarChar(120)
+  colony            String     @db.VarChar(120)
+  address           String?    @db.VarChar(255)
+  mapsUrl           String?    @db.VarChar(500)
+  status            SiteStatus @default(ACTIVE)
+  isIncomplete      Boolean    @default(false)
+  source            SiteSource @default(ADMIN)
+  mergedIntoId      Int?
+  mergedInto        Site?      @relation("Merge", fields: [mergedIntoId], references: [id])
+  mergedFrom        Site[]     @relation("Merge")
+  submittedByPartnerId Int?
+  submittedByPartner   Partner? @relation("SubmittedBy", fields: [submittedByPartnerId], references: [id])
+  createdById       Int?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  phones   SitePhone[]
+  aliases  SiteAlias[]
+  links    SiteLink[]
+  lots     PointLot[]
+
+  @@index([colony])
+  @@index([ownerName])
+  @@index([status])
+}
+
+model SitePhone {
+  id     Int    @id @default(autoincrement())
+  siteId Int
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  phone  String @db.VarChar(15)
+  label  String? @db.VarChar(40)
+
+  @@unique([siteId, phone])
+  @@index([phone])
+}
+
+// A merged Site Code keeps resolving to the surviving site.
+model SiteAlias {
+  id        Int      @id @default(autoincrement())
+  alias     String   @unique @db.VarChar(20)
+  siteId    Int
+  site      Site     @relation(fields: [siteId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+enum LinkStatus {
+  ACTIVE
+  ENDED
+  EXPIRED
+}
+
+model SiteLink {
+  id           Int        @id @default(autoincrement())
+  siteId       Int
+  site         Site       @relation(fields: [siteId], references: [id])
+  partnerId    Int
+  partner      Partner    @relation(fields: [partnerId], references: [id])
+  trade        Trade
+  startDate    DateTime   @db.Date
+  endDate      DateTime   @db.Date // exclusive: start + 12 months
+  endedOn      DateTime?  @db.Date // set when ended early or replaced (exclusive)
+  status       LinkStatus @default(ACTIVE)
+  // "siteId:TRADE" while active, NULL otherwise -> unique = one active link per trade per site
+  activeSlot   String?    @unique @db.VarChar(40)
+  reason       String?    @db.VarChar(500)
+  endReason    String?    @db.VarChar(500)
+  reminderSentAt DateTime?
+  renewedFromId Int?
+  createdById  Int?
+  endedById    Int?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([siteId, trade])
+  @@index([partnerId])
+  @@index([status, endDate])
+}
+
+enum LinkRequestType {
+  EXISTING_SITE
+  NEW_SITE
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model SiteLinkRequest {
+  id           Int             @id @default(autoincrement())
+  partnerId    Int
+  partner      Partner         @relation(fields: [partnerId], references: [id])
+  type         LinkRequestType
+  siteCode     String?         @db.VarChar(20)
+  ownerName    String?         @db.VarChar(120)
+  phone        String?         @db.VarChar(15)
+  colony       String?         @db.VarChar(120)
+  mapsUrl      String?         @db.VarChar(500)
+  status       RequestStatus   @default(PENDING)
+  reviewNote   String?         @db.VarChar(500)
+  reviewedById Int?
+  reviewedAt   DateTime?
+  siteId       Int?
+  linkId       Int?
+  createdAt    DateTime        @default(now())
+
+  @@index([status])
+  @@index([partnerId])
+}
+
+// ───────────────────────────── Uploads, invoices, credit notes ─────────────────────────────
+
+enum UploadKind {
+  INVOICE
+  CREDIT_NOTE
+}
+
+enum UploadStatus {
+  PROCESSED
+  REJECTED
+  FAILED
+}
+
+model UploadBatch {
+  id                Int          @id @default(autoincrement())
+  kind              UploadKind
+  fileName          String       @db.VarChar(255)
+  fileSize          Int
+  storageKey        String?      @db.VarChar(255)
+  status            UploadStatus
+  errorMessage      String?      @db.Text
+  linesRead         Int          @default(0)
+  documentsProcessed Int         @default(0)
+  documentsSkipped  Int          @default(0)
+  linesException    Int          @default(0)
+  linesIgnored      Int          @default(0)
+  pointsCredited    Int          @default(0)
+  pointsReversed    Int          @default(0)
+  summary           Json?
+  settingsVersionId Int?
+  settingsVersion   SettingsVersion? @relation(fields: [settingsVersionId], references: [id])
+  uploadedById      Int
+  createdAt         DateTime     @default(now())
+
+  invoices    Invoice[]
+  creditNotes CreditNote[]
+  exceptions  UploadException[]
+
+  @@index([createdAt])
+}
+
+model Invoice {
+  id            Int         @id @default(autoincrement())
+  number        String      @unique @db.VarChar(60)
+  invoiceDate   DateTime    @db.Date
+  paymentDate   DateTime    @db.Date
+  uploadBatchId Int
+  uploadBatch   UploadBatch @relation(fields: [uploadBatchId], references: [id])
+  createdAt     DateTime    @default(now())
+
+  lines InvoiceLine[]
+  lots  PointLot[]
+
+  @@index([paymentDate])
+}
+
+enum LineStatus {
+  CREDITED      // earned points
+  NO_PARTNER    // no eligible partner linked on invoice date ("unlinked")
+  WALK_IN       // ignored
+  EXCEPTION     // waiting in exceptions queue
+  NETTED_OUT    // fully returned before payment
+  DISMISSED     // exception dismissed by staff
+}
+
+model InvoiceLine {
+  id           Int        @id @default(autoincrement())
+  invoiceId    Int
+  invoice      Invoice    @relation(fields: [invoiceId], references: [id])
+  rowNumber    Int
+  siteCodeRaw  String?    @db.VarChar(40)
+  siteId       Int?
+  itemName     String     @db.VarChar(255)
+  categoryRaw  String?    @db.VarChar(60)
+  category     Int?
+  quantity     Decimal    @db.Decimal(14, 3)
+  unit         String?    @db.VarChar(20)
+  taxableValue Decimal    @db.Decimal(14, 2)
+  status       LineStatus
+  lotId        Int?
+
+  @@index([invoiceId])
+  @@index([siteId, status])
+  @@index([status])
+}
+
+enum CreditNoteStatus {
+  APPLIED
+  PENDING_INVOICE
+}
+
+model CreditNote {
+  id                    Int              @id @default(autoincrement())
+  number                String           @unique @db.VarChar(60)
+  noteDate              DateTime         @db.Date
+  originalInvoiceNumber String           @db.VarChar(60)
+  status                CreditNoteStatus
+  uploadBatchId         Int
+  uploadBatch           UploadBatch      @relation(fields: [uploadBatchId], references: [id])
+  createdAt             DateTime         @default(now())
+
+  lines CreditNoteLine[]
+
+  @@index([originalInvoiceNumber])
+}
+
+enum CreditLineStatus {
+  REVERSED         // points reversed from the partner who earned them
+  NO_POINTS        // original line earned no points (WALK-IN, unlinked…)
+  PENDING_INVOICE  // invoice not paid/uploaded yet; netted when it arrives
+  APPLIED_NET      // netted into the invoice before points were calculated
+  EXCEPTION
+  DISMISSED
+}
+
+model CreditNoteLine {
+  id             Int              @id @default(autoincrement())
+  creditNoteId   Int
+  creditNote     CreditNote       @relation(fields: [creditNoteId], references: [id])
+  rowNumber      Int
+  siteCodeRaw    String?          @db.VarChar(40)
+  itemName       String           @db.VarChar(255)
+  categoryRaw    String?          @db.VarChar(60)
+  category       Int?
+  quantity       Decimal          @db.Decimal(14, 3)
+  unit           String?          @db.VarChar(20)
+  taxableValue   Decimal          @db.Decimal(14, 2)
+  status         CreditLineStatus
+  pointsReversed Int              @default(0)
+  originalInvoiceNumber String    @db.VarChar(60)
+
+  @@index([creditNoteId])
+  @@index([originalInvoiceNumber, status])
+}
+
+enum ExceptionReason {
+  MISSING_SITE_CODE
+  UNKNOWN_SITE_CODE
+  MISSING_CATEGORY
+  INVALID_CATEGORY
+  INVALID_VALUE
+  INVALID_DATE
+  UNKNOWN_INVOICE
+}
+
+enum ExceptionStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+model UploadException {
+  id               Int             @id @default(autoincrement())
+  uploadBatchId    Int
+  uploadBatch      UploadBatch     @relation(fields: [uploadBatchId], references: [id])
+  kind             UploadKind
+  invoiceLineId    Int?            @unique
+  creditNoteLineId Int?            @unique
+  documentNumber   String          @db.VarChar(60)
+  rowNumber        Int
+  reason           ExceptionReason
+  raw              Json
+  status           ExceptionStatus @default(OPEN)
+  attempts         Int             @default(0)
+  history          Json?
+  resolutionNote   String?         @db.VarChar(500)
+  resolvedById     Int?
+  resolvedAt       DateTime?
+  createdAt        DateTime        @default(now())
+
+  @@index([status])
+}
+
+// ───────────────────────────── Points ─────────────────────────────
+
+// One lot = points credited for one (invoice, site, category). Consumed oldest first.
+model PointLot {
+  id               Int       @id @default(autoincrement())
+  partnerId        Int
+  partner          Partner   @relation(fields: [partnerId], references: [id])
+  // invoiceId/siteId/category are NULL only for owner manual adjustments (basisType ADJUSTMENT)
+  invoiceId        Int?
+  invoice          Invoice?  @relation(fields: [invoiceId], references: [id])
+  siteId           Int?
+  site             Site?     @relation(fields: [siteId], references: [id])
+  category         Int?
+  trade            Trade
+  basisType        String    @db.VarChar(10) // QUANTITY | VALUE | ADJUSTMENT
+  basis            Decimal   @default(0) @db.Decimal(16, 3) // net bags or net taxable value used
+  returnedBasis    Decimal   @default(0) @db.Decimal(16, 3)
+  taxableValue     Decimal   @default(0) @db.Decimal(16, 2) // net taxable value (for tiers & reports)
+  ratePoints       Decimal   @default(0) @db.Decimal(10, 4)
+  ratePer          Decimal   @default(1) @db.Decimal(10, 4)
+  multiplier       Decimal   @default(1) @db.Decimal(6, 4)
+  tier             Tier
+  points           Int       // originally credited
+  remaining        Int
+  redeemedPoints   Int       @default(0)
+  reversedPoints   Int       @default(0)
+  expiredPoints    Int       @default(0)
+  adjustedPoints   Int       @default(0)
+  creditedAt       DateTime
+  unlockAt         DateTime
+  expiresAt        DateTime
+  unlockNotifiedAt DateTime?
+  settingsVersionId Int?
+  createdAt        DateTime  @default(now())
+
+  allocations LotAllocation[]
+
+  @@index([partnerId, expiresAt])
+  @@index([invoiceId, category])
+  @@index([unlockAt])
+}
+
+enum LedgerType {
+  CREDIT
+  REVERSAL
+  REDEMPTION
+  REDEMPTION_REFUND
+  EXPIRY
+  ADJUSTMENT
+}
+
+model LedgerEntry {
+  id           Int        @id @default(autoincrement())
+  partnerId    Int
+  partner      Partner    @relation(fields: [partnerId], references: [id])
+  type         LedgerType
+  points       Int        // signed: + credit/refund/adjust-up, - reversal/redemption/expiry/adjust-down
+  lotId        Int?
+  invoiceId    Int?
+  creditNoteId Int?
+  redemptionId Int?
+  siteId       Int?
+  category     Int?
+  note         String?    @db.VarChar(500)
+  createdById  Int?
+  createdAt    DateTime   @default(now())
+
+  allocations LotAllocation[]
+
+  @@index([partnerId, createdAt])
+  @@index([type, createdAt])
+}
+
+// Which lot a debit came out of (needed to refund a rejected redemption to the same lots)
+model LotAllocation {
+  id            Int         @id @default(autoincrement())
+  lotId         Int
+  lot           PointLot    @relation(fields: [lotId], references: [id])
+  ledgerEntryId Int
+  ledgerEntry   LedgerEntry @relation(fields: [ledgerEntryId], references: [id])
+  points        Int
+  createdAt     DateTime    @default(now())
+
+  @@index([lotId])
+  @@index([ledgerEntryId])
+}
+
+enum ShortfallStatus {
+  OPEN
+  RECOVERED
+  WAIVED
+}
+
+// A return whose points could not be fully reversed (spec RET-08 / open question Q3)
+model ReversalShortfall {
+  id               Int             @id @default(autoincrement())
+  partnerId        Int
+  partner          Partner         @relation(fields: [partnerId], references: [id])
+  creditNoteLineId Int
+  points           Int
+  recoveredPoints  Int             @default(0)
+  policy           String          @db.VarChar(30)
+  status           ShortfallStatus @default(OPEN)
+  note             String?         @db.VarChar(500)
+  createdAt        DateTime        @default(now())
+
+  @@index([status])
+}
+
+// ───────────────────────────── Rewards & redemptions ─────────────────────────────
+
+enum RewardStatus {
+  ACTIVE
+  INACTIVE
+  RETIRED
+}
+
+model Reward {
+  id          Int          @id @default(autoincrement())
+  name        String       @db.VarChar(120)
+  description String?      @db.VarChar(500)
+  section     String       @default("General") @db.VarChar(60)
+  points      Int
+  imageKey    String?      @db.VarChar(255)
+  status      RewardStatus @default(ACTIVE)
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  redemptions Redemption[]
+}
+
+enum RedemptionStatus {
+  REQUESTED
+  APPROVED
+  READY
+  COLLECTED
+  REJECTED
+}
+
+model Redemption {
+  id              Int              @id @default(autoincrement())
+  number          String           @unique @db.VarChar(20)
+  partnerId       Int
+  partner         Partner          @relation(fields: [partnerId], references: [id])
+  rewardId        Int
+  reward          Reward           @relation(fields: [rewardId], references: [id])
+  rewardName      String           @db.VarChar(120)
+  points          Int
+  pointValue      Decimal          @db.Decimal(10, 4)
+  notes           String?          @db.VarChar(500)
+  status          RedemptionStatus @default(REQUESTED)
+  rejectionReason String?          @db.VarChar(500)
+  requestedAt     DateTime         @default(now())
+  approvedAt      DateTime?
+  readyAt         DateTime?
+  collectedAt     DateTime?
+  rejectedAt      DateTime?
+  handledById     Int?
+
+  @@index([status])
+  @@index([partnerId])
+}
+
+// ───────────────────────────── Settings, notifications, audit ─────────────────────────────
+
+// Every change creates a new version. Each upload and each lot keeps the version it used,
+// so old transactions are never recalculated with new rates.
+model SettingsVersion {
+  id          Int      @id @default(autoincrement())
+  values      Json
+  note        String?  @db.VarChar(500)
+  createdById Int?
+  createdAt   DateTime @default(now())
+
+  uploads UploadBatch[]
+}
+
+enum Audience {
+  PARTNER
+  STAFF
+}
+
+model Notification {
+  id        Int       @id @default(autoincrement())
+  audience  Audience
+  userId    Int?      // partner's user, or a specific staff user; NULL + STAFF = all staff
+  user      User?     @relation(fields: [userId], references: [id])
+  type      String    @db.VarChar(40)
+  title     String    @db.VarChar(200)
+  body      String    @db.VarChar(1000)
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([audience, userId, readAt])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int?
+  user       User?    @relation(fields: [userId], references: [id])
+  action     String   @db.VarChar(60)
+  entityType String   @db.VarChar(40)
+  entityId   String?  @db.VarChar(40)
+  before     Json?
+  after      Json?
+  reason     String?  @db.VarChar(500)
+  ip         String?  @db.VarChar(64)
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@index([action])
+}
